@@ -77,12 +77,19 @@ def request_input_text(input_text):
         "씨제이올리브영네트웍스(주)":"올리브영 ",
         "씨제이올리브네트웍스(주)":"올리브영 ",
         "씨제이올리브네트웍스":"올리브영 ",
+        "씨제이올리브영":"올리브영 ",
         "메가엠지씨커피":"메가커피 ",
+        "다이소아성산업":"다이소 ",
+        "한국맥도날드 (유)":"맥도날드 ",
         "비알코리아(주)":"",
         "씨제이올리브영(주)":"올리브영 ",
+        "씨제이올리브영":"올리브영 ",
         "한국맥도날드(유)":"맥도날드 ",
         "(주)커피빈코리아":"커피빈 ",
         "주식회사 비케이알":"버거킹",
+        "비케이알버거킹":"버거킹",
+        "BKR버거킹":"버거킹 ",
+        "메가엠지씨":"메가커피 ",
         "(주)파리크라상 ":"",
         "비지에프리테일":"CU",
         "씨유(CU)":"CU",
@@ -90,7 +97,8 @@ def request_input_text(input_text):
         "(주)비케이알":"",
         "(주)":"",
         "(매점)":"",
-        "(매장)":""
+        "(매장)":"",
+        "K7 ":"세븐일레븐"
     }
 
     for key, value in replacements.items():
@@ -100,6 +108,108 @@ def request_input_text(input_text):
 def get_category_list(df, category_name):
     """각 카테고리별 리스트만드는 함수"""
     return df[df[category_name] != ""][category_name].tolist()
+
+
+
+#유저 자동화
+import numpy as np
+
+with live_db_conn() as conn:
+    cursor = conn.cursor()
+    sql = """
+    SELECT DISTINCT T1.cardNo, T1.merchantName, 
+        CONCAT(LEFT(T1.approvalDateTime, 4),'-',RIGHT(LEFT(T1.approvalDateTime, 6),2),'-',RIGHT(LEFT(T1.approvalDateTime, 8),2)) AS 'cardTime',
+        T3.cardDt, T3.cardChannel, T3.cardSrc, T6.name AS 'user_country', T3.KONA_CARD_ID
+    FROM redtable2021.KONA_TRANSACTION T1
+    LEFT JOIN redtable2021.KONA_CARD T2 ON T1.cardNo = T2.card_no
+    LEFT JOIN redtable2021.KONA_SOURCE T3 ON T2.id = T3.KONA_CARD_ID
+    LEFT JOIN redtable2021.KTC_USER T4 ON T1.userId = T4.card_user_id
+    LEFT JOIN redtable2021.user T5 ON T4.user_id = T5.id
+    LEFT JOIN redtable2021.IA_KTC_COUNTRY_CODE T6 ON T5.country = T6.code AND T6.lang = 'ko'
+    WHERE T1.trType = '01' AND T1.mti = '0100' AND T1.responseCode = '00'
+        AND T1.merchantName = '주식회사 레드테이블(환전소3)'
+    ORDER BY T1.id ASC
+    """
+    cursor.execute(sql)
+    df = pd.DataFrame(cursor.fetchall())
+
+cond1 = df["cardChannel"] != '내부인원'
+cond2 = df["cardChannel"] != '인천공항T1 우리은행'
+
+df = df.loc[cond1 & cond2]
+df.reset_index(drop=True, inplace=True)
+df.replace({np.nan:None}, inplace=True)
+
+with live_db_conn() as conn:
+    with conn.cursor() as curs:
+        cursor = conn.cursor()
+        sql = """
+        UPDATE redtable2021.KONA_SOURCE
+        SET cardDt = %s, cardChannel = %s, cardSrc = %s
+        WHERE KONA_CARD_ID = %s
+        """
+        val = df.apply(lambda row:(row["cardTime"], "인천공항T1 우리은행", row["user_country"], row["KONA_CARD_ID"]), axis=1).tolist()
+        #curs.executemany(sql, val)
+        cursor.executemany(sql, val)
+    
+# 코나카드 유저 자동화 매핑
+
+with live_db_conn() as conn:
+    cursor = conn.cursor()
+    sql = """
+    SELECT DISTINCT T1.cardNo, T1.id, T1.merchantName,
+        CONCAT(LEFT(T1.approvalDateTime, 4),'-',RIGHT(LEFT(T1.approvalDateTime, 6),2),'-',RIGHT(LEFT(T1.approvalDateTime, 8),2)) AS 'cardTime',
+        T3.cardDt, T3.cardChannel, T3.cardSrc, T6.name AS 'user_country', T3.KONA_CARD_ID
+    FROM redtable2021.KONA_TRANSACTION T1
+    LEFT JOIN redtable2021.KONA_CARD T2 ON T1.cardNo = T2.card_no
+    LEFT JOIN redtable2021.KONA_SOURCE T3 ON T2.id = T3.KONA_CARD_ID
+    LEFT JOIN redtable2021.KTC_USER T4 ON T1.userId = T4.card_user_id
+    LEFT JOIN redtable2021.user T5 ON T4.user_id = T5.id
+    LEFT JOIN redtable2021.IA_KTC_COUNTRY_CODE T6 ON T5.country = T6.code AND T6.lang = 'ko'
+    WHERE T1.trType = '01' AND T1.mti = '0100' AND T1.responseCode = '00' AND T1.userId != 0
+        AND T1.merchantName = '주식회사 레드테이블'
+    GROUP BY T1.cardNo
+    ORDER BY T1.id ASC
+    """
+    cursor.execute(sql)
+    df1 = pd.DataFrame(cursor.fetchall())
+    
+cond1 = df1["cardDt"].isnull()
+cond2 = df1["id"] > 600
+
+df1 = df1.loc[cond1 & cond2]
+df1.reset_index(drop=True, inplace=True)
+df1.replace({np.nan:None}, inplace=True)
+
+with live_db_conn() as conn:
+    with conn.cursor() as cursor:
+        for index, row in df1.iterrows():
+            # Check if cardChannel is NULL in the database
+            check_sql = "SELECT cardChannel FROM redtable2021.KONA_SOURCE WHERE KONA_CARD_ID = %s"
+            cursor.execute(check_sql, (row["KONA_CARD_ID"],))
+            result = cursor.fetchone()
+            cardChannel = result['cardChannel'] if result else None 
+            
+            if cardChannel is None :
+                print("none")
+                sql = """
+                UPDATE redtable2021.KONA_SOURCE
+                SET cardDt = %s, cardChannel = %s, cardSrc = %s
+                WHERE KONA_CARD_ID = %s and cardChannel is null
+                """
+                val = (row["cardTime"], "패키지카드 수령고객", row["user_country"], row["KONA_CARD_ID"])
+            else:
+                print("yes")
+                sql = """
+                UPDATE redtable2021.KONA_SOURCE
+                SET cardDt = %s, cardSrc = %s
+                WHERE KONA_CARD_ID = %s and cardChannel is not null
+                """
+                val = (row["cardTime"], row["user_country"], row["KONA_CARD_ID"])
+            
+            cursor.execute(sql, val)
+
+
 
 
 # 필요데이터
@@ -115,7 +225,7 @@ with live_db_conn() as conn:
     """페이카드 데이터 + KTC여부 데이터 추출 쿼리"""
     cursor = conn.cursor()
     sql = f"""
-    SELECT  business_1 AS '사업자번호', name AS '상점명', category_one,	category_two, address,	address_doro,	naver_id
+    SELECT  business_1 AS '사업자번호', name AS '상점명', category AS '카테고리_대분류' , category_one,	category_two, address,	address_doro,	naver_id
     FROM redtable2021.dic_naver_category
     """
     cursor.execute(sql)
@@ -123,15 +233,6 @@ with live_db_conn() as conn:
     #IA_KTC_TRANSACTION = pd.read_sql(sql, conn)
 naver_category_sheet = naver_category_db
 
-'''# 풀카드번호 리스트
-sh = sa.open("코나카드")
-wks = sh.worksheet("코나카드")
-values = wks.get_all_values()
-header, rows = values[0], values[1:]
-df_kona_full_card = pd.DataFrame(rows, columns=header)
-df_kona_full_card = df_kona_full_card[["카드번호", "분출날짜", "분출채널", "분출세부내용"]]
-df_kona_full_card["카드번호"] = df_kona_full_card["카드번호"].apply(lambda x:x.replace("-",""))
-'''
 
 with live_db_conn() as conn:
     cursor = conn.cursor()
@@ -151,22 +252,20 @@ with live_db_conn() as conn:
             T1.trAmount AS '결제금액', ROUND(T1.balanceAfter, 0) AS '결제후금액', userId
     FROM redtable2021.KONA_TRANSACTION T1
     WHERE T1.trType = "00" AND T1.mti = "0100" AND T1.authCancelType != "CANCEL" AND T1.responseCode = "00"
-        AND T1.id NOT IN (37, 39, 49);
+        AND T1.id NOT IN (37, 39, 49) AND T1.bizTypeName NOT IN ('테스트');
     """
     cursor.execute(sql)
     KONA_TRANSACTION = pd.DataFrame(cursor.fetchall())
 
 #KONA_CARD = pd.merge(KONA_CARD, df_kona_full_card, on="카드번호", how="left")
 KONA_TRANSACTION = pd.merge(KONA_TRANSACTION, KONA_CARD, on="카드번호", how="left")
-KONA_TRANSACTION['분출날짜'] = pd.to_datetime(KONA_TRANSACTION['분출날짜']).dt.date
+KONA_TRANSACTION['분출날짜'] = pd.to_datetime(KONA_TRANSACTION['분출날짜'],errors='coerce').dt.date
 KONA_TRANSACTION.fillna('', inplace=True)   
 
 ### 네이버 카테고리 추가 ###
 headers = {'User-Agent' : 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36'}
 store_nm_result, naver_id, category_one_result, category_two_result, address_result, roadAddress_result , business_number_result = ([] for _ in range(7))
-
 naver_category_sheet = naver_category_sheet.rename(columns={"대분류":"category_one", "소분류":"category_two", "네이버_주소":"주소"})
-
 store_nm_mapping_list = list(set(KONA_TRANSACTION["상점명"].tolist()))
 
 #store_nm_mapping_list = KONA_TRANSACTION[['사업자번호', '상점명']].drop_duplicates().to_dict('records')
@@ -190,7 +289,7 @@ df_naver_search = pd.merge(df_naver_search, combined_list, on=['사업자번호'
 
 naver_dic = pd.concat([naver_category_sheet, df_naver_search])
 naver_dic["상점명"] = naver_dic["상점명"].fillna("")
-naver_dic.drop_duplicates(subset=["상점명"], inplace=True)
+naver_dic.drop_duplicates(subset=["상점명","사업자번호"], inplace=True)
 naver_dic.reset_index(drop=True, inplace=True)
 naver_dic = naver_dic.fillna("")
 
@@ -199,7 +298,7 @@ naver_dic = naver_dic.fillna("")
 
 df_final = pd.merge(KONA_TRANSACTION, naver_dic,  on=["상점명","사업자번호"], how="left")
 
-categories = ["식음료비", "기타", "문화/오락비", "쇼핑비", "현지교통비", "의료/뷰티비"]
+'''categories = ["식음료비", "기타", "문화/오락비", "쇼핑비", "현지교통비", "의료/뷰티비"]
 food_list, etc_list, game_list, shopping_list, trans_list, beauty_list = (
     get_category_list(naver_to_large_category, category) for category in categories
 )
@@ -221,7 +320,7 @@ def naver_main_category(category_text):
         if category_text in category_dict:
             return category
     else:
-        return "카테고리 추가필요"
+        return "카테고리 추가필요"'''
     
 
 
@@ -232,7 +331,7 @@ df_final["채널_대분류"] = df_final["분출채널"].apply(lambda x:channel_m
 
 ######## 카테고리_대분류 ########
 df_final = df_final.rename(columns={"address": "주소"})
-df_final["카테고리_대분류"] = df_final["category_one"].apply(lambda x:naver_main_category(x))
+#df_final["카테고리_대분류"] = df_final["category_one"].apply(lambda x:naver_main_category(x))
 df_final["시/도"] = df_final["주소"].apply(lambda x:x.split()[0] if len(x.split()) > 0 else "")
 df_final["시/군/구"] = df_final["주소"].apply(lambda x:x.split()[1] if len(x.split()) > 1 else "")
 
@@ -327,13 +426,14 @@ with live_db_conn() as conn:
     data05 = pd.DataFrame(cursor.fetchall())
     
     sql = """
-    SELECT CONCAT(LEFT(T1.approvalDateTime, 4), '-', RIGHT(LEFT(T1.approvalDateTime, 6), 2), '-', RIGHT(LEFT(T1.approvalDateTime, 8), 2)) AS '결제날짜',
-        SUM(CASE WHEN T1.trType = '00' THEN T1.trAmount ELSE 0 END) - 
-       SUM(CASE WHEN T1.trType = '02' THEN T1.trAmount ELSE 0 END) AS '결제금액',
-       COUNT(DISTINCT CASE WHEN T1.trType = '00' THEN T1.id ELSE 0 END) AS '결제수',
-       COUNT(DISTINCT CASE WHEN T1.trType = '00' THEN T1.cardNo ELSE 0 END) AS '결제인원',
-       ROUND( (SUM(CASE WHEN T1.trType = '00' THEN T1.trAmount ELSE 0 END) - SUM(CASE WHEN T1.trType = '02' THEN T1.trAmount ELSE 0 END)) / COUNT(DISTINCT CASE WHEN T1.trType = '00' THEN T1.cardNo ELSE 0 END), 0) AS '결제객단가'
+        SELECT CONCAT(LEFT(T1.approvalDateTime, 4), '-', RIGHT(LEFT(T1.approvalDateTime, 6), 2), '-', RIGHT(LEFT(T1.approvalDateTime, 8), 2)) AS '결제날짜',
+      SUM(CASE WHEN T1.mti = '0100' THEN T1.trAmount ELSE 0 END) - 
+     SUM(CASE WHEN T1.mti = '0400' THEN T1.trAmount ELSE 0 END) AS '결제금액',
+     COUNT(DISTINCT CASE WHEN T1.mti = '0100' THEN T1.id ELSE 0 END) AS '결제수',
+     COUNT(DISTINCT CASE WHEN T1.mti = '0100' THEN T1.cardNo ELSE 0 END) AS '결제인원',
+     ROUND( (SUM(CASE WHEN T1.mti = '0100' THEN T1.trAmount ELSE 0 END) - SUM(CASE WHEN T1.mti = '0400' THEN T1.trAmount ELSE 0 END)) / COUNT(DISTINCT CASE WHEN T1.mti = '0100' THEN T1.cardNo ELSE 0 END), 0) AS '결제객단가'
     FROM redtable2021.KONA_TRANSACTION T1
+    WHERE T1.trType = '00' AND T1.responseCode = '00' AND T1.id NOT IN (37, 39, 49, 339)
     GROUP BY 결제날짜
     ORDER BY 결제날짜 ASC;
     """
